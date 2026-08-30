@@ -1,0 +1,7 @@
+{
+  "framework": "nextjs",
+  "functions": {
+    "app/api/ai/route.ts": { "maxDuration": 60 },
+    "app/api/book/[id]/route.ts": { "maxDuration": 60 }
+  }
+}
