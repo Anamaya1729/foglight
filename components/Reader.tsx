@@ -263,13 +263,13 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
    * Select several words and the same card explains the phrase.
    */
   const lookUpWord = useCallback(
-    async (raw: string, para: number, x: number, y: number) => {
+    async (raw: string, para: number, x: number, y: number, span?: { start: number; end: number }) => {
       // Trim the punctuation off both ends but keep the inside intact: a selection of
       // several words ("a countenance of some pretension") is looked up the same way a
       // single one is, since a phrase is exactly where the meaning tends to hide.
       const clean = raw.replace(/\s+/g, " ").replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "").slice(0, 140);
       if (!clean) return;
-      setWord({ word: clean, para, x, y });
+      setWord({ word: clean, para, x, y, start: span?.start, end: span?.end });
 
       const key = cacheKey("gloss", bookId, ch, para, clean);
       const hit = cacheGet(key);
@@ -347,13 +347,81 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
     range.setEnd(node, b);
     const rect = range.getBoundingClientRect();
     const hostRect = host.getBoundingClientRect();
+    // Where this word sits in the paragraph's own text. Measured with a range rather
+    // than string search because the same word usually appears more than once, and
+    // markup inside the paragraph means the text is spread over several nodes.
+    const pre = document.createRange();
+    pre.selectNodeContents(el);
+    pre.setEnd(node, a);
+    const start = pre.toString().length;
     return {
       word: picked,
       para: Number(el.dataset.para),
       x: rect.left + rect.width / 2 - hostRect.left,
       y: rect.bottom - hostRect.top + 10,
+      start,
+      end: start + picked.length,
     };
   }, []);
+
+  /**
+   * Grow the looked-up phrase by one word, left or right.
+   *
+   * WHY THIS EXISTS: on Android you cannot reliably select two or three words. A
+   * multi-word selection needs a long-press followed by dragging the handles, and the
+   * OS grabs that gesture for its own bar ("Search web", Lens) before the page ever
+   * sees it. His words: "google interferes with it so much I cannot select 2 or 3
+   * words together." So phrases are built by TAPPING, which the OS never intercepts:
+   * tap a word, then widen. No text selection is involved at any point.
+   *
+   * Offsets are measured against the paragraph element's own textContent, not the
+   * source string — `Rich` strips the _underscores_ Gutenberg uses for italics, so the
+   * two differ by exactly the characters that would misalign every span after the
+   * first emphasis in a paragraph.
+   */
+  const extendTimer = useRef<number | null>(null);
+  const extendPhrase = useCallback(
+    (dir: -1 | 1) => {
+      if (!word || word.start == null || word.end == null) return;
+      const text = paraRefs.current[word.para]?.textContent ?? "";
+      if (!text) return;
+      const isWord = (c: string) => /[\p{L}\p{M}'\u2019-]/u.test(c);
+      let { start, end } = word as { start: number; end: number };
+      // Skip the gap, then take the word. Both halves are needed: the gap alone is not
+      // an extension. Widening left from the first word of a paragraph would otherwise
+      // swallow the opening quotation mark and report "“My dear Mr" as a wider phrase
+      // while adding no word at all -- caught on Pride and Prejudice, chapter 1.
+      if (dir < 0) {
+        let gap = start;
+        while (gap > 0 && !isWord(text[gap - 1])) gap--;
+        let head = gap;
+        while (head > 0 && isWord(text[head - 1])) head--;
+        if (head === gap) return;
+        start = head;
+      } else {
+        let gap = end;
+        while (gap < text.length && !isWord(text[gap])) gap++;
+        let tail = gap;
+        while (tail < text.length && isWord(text[tail])) tail++;
+        if (tail === gap) return;
+        end = tail;
+      }
+      const phrase = text.slice(start, end).trim();
+      if (!phrase || phrase.length > 140) return;
+
+      // Show the wider phrase at once, but only ask the model once the tapping stops.
+      // Without the debounce, growing "a countenance of some pretension" one word at a
+      // time would fire five calls and bill for four answers nobody reads.
+      navigator.vibrate?.(6);
+      setWord({ ...word, word: phrase, start, end });
+      setWordGloss({ text: "", loading: true });
+      if (extendTimer.current) window.clearTimeout(extendTimer.current);
+      extendTimer.current = window.setTimeout(() => {
+        lookUpWord(phrase, word.para, word.x, word.y, { start, end });
+      }, 450);
+    },
+    [word, lookUpWord]
+  );
 
   /**
    * The model can take half a minute to answer. Fetching the next paragraph's plain
@@ -449,7 +517,11 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
   /* ------------------------------------------------------------ selection */
 
   useEffect(() => {
-    if (!features.tracker && !features.untangle) return;
+    // The popover below renders on `features.words || tracker || untangle`, but this
+    // effect used to bail unless tracker or untangle were on — so with only word
+    // lookup enabled, `sel` was never set and selecting several words did nothing at
+    // all. The two gates have to agree or the feature silently does not exist.
+    if (!features.words && !features.tracker && !features.untangle) return;
     const onUp = () => {
       const s = window.getSelection();
       const text = s?.toString().trim() ?? "";
@@ -478,11 +550,15 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
     };
     document.addEventListener("mouseup", onUp);
     document.addEventListener("touchend", onUp);
+    // Android finalises a selection AFTER touchend when the drag handles are used,
+    // so touchend alone misses every adjustment made with the handles.
+    document.addEventListener("selectionchange", onUp);
     return () => {
       document.removeEventListener("mouseup", onUp);
       document.removeEventListener("touchend", onUp);
+      document.removeEventListener("selectionchange", onUp);
     };
-  }, [features.tracker, features.untangle]);
+  }, [features.words, features.tracker, features.untangle]);
 
   /* --------------------------------------------------------------- recap */
 
@@ -626,7 +702,7 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
                   if (!features.words || window.matchMedia("(hover: none)").matches) return;
                   if ((window.getSelection()?.toString() ?? "").trim()) return;
                   const at = wordAtPoint(e.clientX, e.clientY);
-                  if (at) lookUpWord(at.word, at.para, at.x, at.y);
+                  if (at) lookUpWord(at.word, at.para, at.x, at.y, { start: at.start, end: at.end });
                 }}
                 onTouchStart={(e) => {
                   const t = e.touches[0];
@@ -653,7 +729,7 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
                     // same gesture that opened it.
                     e.preventDefault();
                     navigator.vibrate?.(8);
-                    lookUpWord(at.word, at.para, at.x, at.y);
+                    lookUpWord(at.word, at.para, at.x, at.y, { start: at.start, end: at.end });
                   }
                 }}
               >
@@ -719,6 +795,7 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
             query={word}
             contextual={wordGloss.text}
             contextLoading={wordGloss.loading}
+            onExtend={word.start != null ? extendPhrase : undefined}
             onClose={() => {
               setWord(null);
               setWordGloss({ text: "", loading: false });

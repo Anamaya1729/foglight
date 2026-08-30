@@ -5,7 +5,15 @@ import { useEffect, useRef, useState } from "react";
 export type Sense = { pos: string; text: string; archaic: boolean };
 export type WordInfo = { word: string; ipa: string | null; senses: Sense[] };
 
-export type WordQuery = { word: string; para: number; x: number; y: number };
+export type WordQuery = {
+  word: string;
+  para: number;
+  x: number;
+  y: number;
+  /** where the phrase sits in the paragraph text, so it can be widened by tapping */
+  start?: number;
+  end?: number;
+};
 
 /**
  * Below this, the card is a bottom sheet rather than a popover hung off the word:
@@ -45,12 +53,20 @@ export default function WordCard({
   contextual,
   contextLoading,
   onClose,
+  onExtend,
 }: {
   query: WordQuery;
   /** the AI's reading of the word in this exact sentence */
   contextual: string;
   contextLoading: boolean;
   onClose: () => void;
+  /**
+   * Widen the lookup by a word. Present only when we know where the phrase sits in the
+   * paragraph. This is how phrases get built on a phone: Android will not let you drag
+   * out a two-word selection without its own menu stealing the gesture, so the reader
+   * taps a word and then widens it here instead.
+   */
+  onExtend?: (dir: -1 | 1) => void;
 }) {
   const [info, setInfo] = useState<WordInfo | null>(null);
   const [speaking, setSpeaking] = useState(false);
@@ -137,6 +153,17 @@ export default function WordCard({
             ×
           </button>
         </div>
+
+        {onExtend && (
+          <div className="wc-grow">
+            <button onClick={() => onExtend(-1)} aria-label="Include the word before">
+              ＋ word before
+            </button>
+            <button onClick={() => onExtend(1)} aria-label="Include the word after">
+              word after ＋
+            </button>
+          </div>
+        )}
 
         <div className="wc-body">
           <p className="wc-sec">{phrase ? "This phrase, here" : "In this sentence"}</p>

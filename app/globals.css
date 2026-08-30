@@ -436,6 +436,31 @@ footer.foot {
 .wordcard.phrase .wc-word { font-size: 16px; font-style: italic; align-self: center; }
 .wordcard.sheet.phrase .wc-word { font-size: 18px; }
 .wordcard.phrase .wc-say, .wordcard.phrase .wc-x { margin-left: 0; align-self: center; }
+/*
+ * Build a phrase by tapping, not by selecting. Android hands a long-press-and-drag to
+ * its own selection bar before the page sees it, so two- and three-word lookups were
+ * effectively impossible on a phone. These widen the lookup a word at a time.
+ * Deliberately large hit areas: this is a thumb control on a moving bus.
+ */
+.wordcard .wc-grow {
+  display: flex; gap: 8px;
+  padding: 10px 16px 0;
+}
+.wordcard .wc-grow button {
+  flex: 1;
+  padding: 9px 10px;
+  font: inherit; font-size: 13px; line-height: 1.1;
+  color: var(--ink-2);
+  background: var(--glow);
+  border: 1px solid var(--rule); border-radius: 9px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.wordcard .wc-grow button:hover { color: var(--ink); border-color: var(--ink-3); }
+.wordcard .wc-grow button:active { transform: translateY(1px); }
+.wordcard.sheet .wc-grow button { padding: 12px 10px; font-size: 14px; }
+
 .wordcard .wc-ipa { font-size: 13.5px; color: var(--ink-3); font-feature-settings: "liga" 0; }
 .wordcard .wc-say {
   margin-left: auto; align-self: center;
