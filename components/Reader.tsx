@@ -364,64 +364,119 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
     };
   }, []);
 
-  /**
-   * Grow the looked-up phrase by one word, left or right.
-   *
-   * WHY THIS EXISTS: on Android you cannot reliably select two or three words. A
-   * multi-word selection needs a long-press followed by dragging the handles, and the
-   * OS grabs that gesture for its own bar ("Search web", Lens) before the page ever
-   * sees it. His words: "google interferes with it so much I cannot select 2 or 3
-   * words together." So phrases are built by TAPPING, which the OS never intercepts:
-   * tap a word, then widen. No text selection is involved at any point.
-   *
-   * Offsets are measured against the paragraph element's own textContent, not the
-   * source string — `Rich` strips the _underscores_ Gutenberg uses for italics, so the
-   * two differ by exactly the characters that would misalign every span after the
-   * first emphasis in a paragraph.
-   */
-  const extendTimer = useRef<number | null>(null);
-  const extendPhrase = useCallback(
-    (dir: -1 | 1) => {
-      if (!word || word.start == null || word.end == null) return;
-      const text = paraRefs.current[word.para]?.textContent ?? "";
-      if (!text) return;
-      const isWord = (c: string) => /[\p{L}\p{M}'\u2019-]/u.test(c);
-      let { start, end } = word as { start: number; end: number };
-      // Skip the gap, then take the word. Both halves are needed: the gap alone is not
-      // an extension. Widening left from the first word of a paragraph would otherwise
-      // swallow the opening quotation mark and report "“My dear Mr" as a wider phrase
-      // while adding no word at all -- caught on Pride and Prejudice, chapter 1.
-      if (dir < 0) {
-        let gap = start;
-        while (gap > 0 && !isWord(text[gap - 1])) gap--;
-        let head = gap;
-        while (head > 0 && isWord(text[head - 1])) head--;
-        if (head === gap) return;
-        start = head;
-      } else {
-        let gap = end;
-        while (gap < text.length && !isWord(text[gap])) gap++;
-        let tail = gap;
-        while (tail < text.length && isWord(text[tail])) tail++;
-        if (tail === gap) return;
-        end = tail;
-      }
-      const phrase = text.slice(start, end).trim();
-      if (!phrase || phrase.length > 140) return;
+  /* ------------------------------------------------------------ pick mode */
 
-      // Show the wider phrase at once, but only ask the model once the tapping stops.
-      // Without the debounce, growing "a countenance of some pretension" one word at a
-      // time would fire five calls and bill for four answers nobody reads.
+  /**
+   * WHY THIS EXISTS: the first cut at phrases put "＋ word" buttons on the card and
+   * looked the phrase up again on every press. His words: "every word I clicked + it
+   * refreshed." Widening a phrase is not a question; it only becomes one when he has
+   * finished choosing. So picking and asking are now separate: enter the mode, tap the
+   * two ends of what you want, ask once, leave.
+   *
+   * Still entirely tap-driven. Android hands a long-press-and-drag to its own selection
+   * bar before the page sees it, so a real text selection is not available to us on the
+   * device this is for.
+   */
+  const [picking, setPicking] = useState(false);
+  const [pick, setPick] = useState<{ para: number; start: number; end: number } | null>(null);
+
+  /** Map character offsets in a paragraph's text back onto a DOM range. */
+  const rangeFromOffsets = useCallback((el: HTMLElement, from: number, to: number) => {
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const r = document.createRange();
+    let seen = 0;
+    let started = false;
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      const len = (n.textContent ?? "").length;
+      if (!started && seen + len >= from) {
+        r.setStart(n, from - seen);
+        started = true;
+      }
+      if (started && seen + len >= to) {
+        r.setEnd(n, to - seen);
+        return r;
+      }
+      seen += len;
+    }
+    return started ? r : null;
+  }, []);
+
+  /**
+   * Paint the chosen span with the CSS Custom Highlight API rather than a real DOM
+   * Selection — a Selection is precisely what summons the OS menu we are avoiding — and
+   * without wrapping anything in a <mark>, which would fight `Rich`'s own <em> spans.
+   */
+  useEffect(() => {
+    // Next 16's CSS parser rejects `::highlight()` as an unknown pseudo-element and
+    // fails the build, so the rule is injected here instead of living in globals.css.
+    if (!document.getElementById("fg-pick-style")) {
+      const tag = document.createElement("style");
+      tag.id = "fg-pick-style";
+      tag.textContent =
+        "::highlight(fg-pick){background:var(--glow);color:var(--ink);" +
+        "text-decoration:underline;text-decoration-color:var(--ink-3);text-underline-offset:3px}";
+      document.head.appendChild(tag);
+    }
+    const H = (window as unknown as { Highlight?: typeof Range }).Highlight;
+    const store = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
+    if (!store || !H) return;
+    if (!pick) {
+      store.delete("fg-pick");
+      return;
+    }
+    const el = paraRefs.current[pick.para];
+    if (!el) return;
+    const r = rangeFromOffsets(el, pick.start, pick.end);
+    if (!r) return;
+    try {
+      store.set("fg-pick", new (H as unknown as new (...a: Range[]) => unknown)(r));
+    } catch {
+      /* older browser: the bar still shows the text, it just is not painted */
+    }
+    return () => {
+      store.delete("fg-pick");
+    };
+  }, [pick, rangeFromOffsets]);
+
+  const pickText = useMemo(() => {
+    if (!pick) return "";
+    const el = paraRefs.current[pick.para];
+    return (el?.textContent ?? "").slice(pick.start, pick.end).trim();
+  }, [pick]);
+
+  /** A tap while picking sets one end of the span; the second tap sets the other. */
+  const takePick = useCallback(
+    (at: { para: number; start: number; end: number }) => {
+      setPick((cur) => {
+        if (!cur || cur.para !== at.para) return { para: at.para, start: at.start, end: at.end };
+        return {
+          para: at.para,
+          start: Math.min(cur.start, at.start),
+          end: Math.max(cur.end, at.end),
+        };
+      });
       navigator.vibrate?.(6);
-      setWord({ ...word, word: phrase, start, end });
-      setWordGloss({ text: "", loading: true });
-      if (extendTimer.current) window.clearTimeout(extendTimer.current);
-      extendTimer.current = window.setTimeout(() => {
-        lookUpWord(phrase, word.para, word.x, word.y, { start, end });
-      }, 450);
     },
-    [word, lookUpWord]
+    []
   );
+
+  const askPick = useCallback(() => {
+    if (!pick || !pickText) return;
+    const el = paraRefs.current[pick.para];
+    const host = pageRef.current;
+    let x = 0;
+    let y = 0;
+    if (el && host) {
+      const r = rangeFromOffsets(el, pick.start, pick.end);
+      const rect = (r ?? el).getBoundingClientRect();
+      const hostRect = host.getBoundingClientRect();
+      x = rect.left + rect.width / 2 - hostRect.left;
+      y = rect.bottom - hostRect.top + 10;
+    }
+    lookUpWord(pickText, pick.para, x, y);
+    setPicking(false);
+    setPick(null);
+  }, [pick, pickText, lookUpWord, rangeFromOffsets]);
 
   /**
    * The model can take half a minute to answer. Fetching the next paragraph's plain
@@ -695,6 +750,11 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
                 data-para={p.i}
                 className={`para ${p.kind === "verse" ? "verse" : ""} ${isCur ? "current" : ""} ${near ? "near" : ""}`}
                 onClick={(e) => {
+                  if (picking) {
+                    const at = wordAtPoint(e.clientX, e.clientY);
+                    if (at) takePick({ para: at.para, start: at.start, end: at.end });
+                    return;
+                  }
                   setCur(p.i);
                   // On a mouse, a plain click on a word is the quickest way in. A drag
                   // is a selection, so leave that to the selection popover. Touch comes
@@ -713,6 +773,18 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
                   tapStart.current = null;
                   const t = e.changedTouches[0];
                   if (!features.words || !s0 || !t) return;
+                  // While picking, a tap marks an end of the span and nothing else: it must
+                  // not move the reading focus or open a card, or choosing the second word
+                  // would scroll the first one out from under him.
+                  if (picking) {
+                    if (Math.hypot(t.clientX - s0.x, t.clientY - s0.y) > 10) return;
+                    const at = wordAtPoint(t.clientX, t.clientY);
+                    if (at) {
+                      e.preventDefault();
+                      takePick({ para: at.para, start: at.start, end: at.end });
+                    }
+                    return;
+                  }
                   // A finger that travelled was scrolling; one that lingered was reaching
                   // for the system's own selection menu. Neither is a tap.
                   if (Math.hypot(t.clientX - s0.x, t.clientY - s0.y) > 10) return;
@@ -790,12 +862,54 @@ export default function Reader({ bookId, initialCh, initialPara }: { bookId: num
           );
         })}
 
+        {picking && (
+          <div className="pickbar" role="dialog" aria-label="Choose a phrase to look up">
+            <div className="pickbar-text">
+              {pickText ? (
+                <>
+                  <span className="pickbar-quote">{pickText}</span>
+                </>
+              ) : (
+                <span className="pickbar-hint">Tap a word. Tap another to reach across to it.</span>
+              )}
+            </div>
+            <div className="pickbar-acts">
+              <button
+                className="pickbar-go"
+                disabled={!pickText}
+                onClick={askPick}
+              >
+                What does this mean?
+              </button>
+              <button
+                className="pickbar-x"
+                onClick={() => {
+                  setPicking(false);
+                  setPick(null);
+                }}
+                aria-label="Leave phrase picking"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        )}
+
         {word && features.words && (
           <WordCard
             query={word}
             contextual={wordGloss.text}
             contextLoading={wordGloss.loading}
-            onExtend={word.start != null ? extendPhrase : undefined}
+            onPickPhrase={
+              word.start != null
+                ? () => {
+                    setPick({ para: word.para, start: word.start!, end: word.end! });
+                    setPicking(true);
+                    setWord(null);
+                    setWordGloss({ text: "", loading: false });
+                  }
+                : undefined
+            }
             onClose={() => {
               setWord(null);
               setWordGloss({ text: "", loading: false });

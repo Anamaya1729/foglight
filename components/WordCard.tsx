@@ -53,7 +53,7 @@ export default function WordCard({
   contextual,
   contextLoading,
   onClose,
-  onExtend,
+  onPickPhrase,
 }: {
   query: WordQuery;
   /** the AI's reading of the word in this exact sentence */
@@ -61,12 +61,11 @@ export default function WordCard({
   contextLoading: boolean;
   onClose: () => void;
   /**
-   * Widen the lookup by a word. Present only when we know where the phrase sits in the
-   * paragraph. This is how phrases get built on a phone: Android will not let you drag
-   * out a two-word selection without its own menu stealing the gesture, so the reader
-   * taps a word and then widens it here instead.
+   * Leave the card and go pick a longer phrase by tapping its two ends. Separate from
+   * looking anything up: widening used to re-ask the model on every press, which made
+   * the card flicker through half-finished phrases nobody asked about.
    */
-  onExtend?: (dir: -1 | 1) => void;
+  onPickPhrase?: () => void;
 }) {
   const [info, setInfo] = useState<WordInfo | null>(null);
   const [speaking, setSpeaking] = useState(false);
@@ -154,14 +153,9 @@ export default function WordCard({
           </button>
         </div>
 
-        {onExtend && (
+        {onPickPhrase && (
           <div className="wc-grow">
-            <button onClick={() => onExtend(-1)} aria-label="Include the word before">
-              ＋ word before
-            </button>
-            <button onClick={() => onExtend(1)} aria-label="Include the word after">
-              word after ＋
-            </button>
+            <button onClick={onPickPhrase}>Look up a longer phrase…</button>
           </div>
         )}
 
